@@ -18,6 +18,7 @@ CREATE TABLE laps (
     tyre_compound ENUM('Hypersoft', 'Ultrasoft', 'Supersoft', 'Soft','Medium','Hard', 'Superhard', 'Intermediate','Wet'),
     tyre_age INT,
     fuel_load FLOAT,
+    is_valid BOOLEAN DEFAULT 1,
     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 );
 
