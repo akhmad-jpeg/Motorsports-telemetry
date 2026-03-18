@@ -29,6 +29,9 @@ TELEMETRY_SAMPLE_RATE = 60  # Sample every 60th packet (1 sample per second)
 MIN_VALID_LAP_TIME_MS = 60000   # 60 seconds minimum
 MAX_VALID_LAP_TIME_MS = 180000  # 3 minutes maximum
 
+# Pit stop detection threshold
+PIT_STOP_LAP_TIME_MS = 90000    # Laps slower than 1:30 likely include pit stop
+
 # ============================================
 # DATABASE CONNECTION
 # ============================================
@@ -157,6 +160,69 @@ def insert_telemetry(conn, lap_id, speed, throttle, brake, gear, rpm, drs):
     conn.commit()
     cursor.close()
 
+def insert_strategy_event(conn, lap_id, event_type, duration_sec):
+    """Insert a strategy event (pit stop, safety car, VSC, red flag, penalty)"""
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO strategy_events (lap_id, event_type, duration_sec)
+        VALUES (%s, %s, %s)
+    """, (lap_id, event_type, duration_sec))
+    
+    conn.commit()
+    cursor.close()
+    
+    print(f"[EVENT] {event_type} logged on lap {lap_id} (duration: {duration_sec}s)")
+
+# ============================================
+# STRATEGY EVENT DETECTION
+# ============================================
+def detect_pit_stop(lap_time_ms, tyre_changed, previous_tyre_compound, new_tyre_compound):
+    """
+    Detect if a pit stop occurred based on lap time and tyre change
+    
+    Returns: (is_pit_stop, estimated_duration)
+    """
+    # Method 1: Tyre compound changed
+    if tyre_changed:
+        # Estimate pit duration (total lap time - normal lap time)
+        estimated_normal_lap = 70000  # Assume ~70s normal lap
+        pit_duration = max(0, (lap_time_ms - estimated_normal_lap) / 1000)
+        return (True, int(pit_duration))
+    
+    # Method 2: Lap time significantly slower (in/out lap with pit)
+    if lap_time_ms > PIT_STOP_LAP_TIME_MS:
+        estimated_normal_lap = 70000
+        pit_duration = max(0, (lap_time_ms - estimated_normal_lap) / 1000)
+        return (True, int(pit_duration))
+    
+    return (False, 0)
+
+def detect_safety_car(avg_speed, lap_time_ms, expected_lap_time_ms):
+    """
+    Detect safety car period based on unusually slow lap with low average speed
+    
+    Returns: (is_safety_car, duration)
+    """
+    # Safety car: Lap time 30-50% slower than expected + low average speed
+    if avg_speed < 150 and lap_time_ms > (expected_lap_time_ms * 1.3):
+        duration = int(lap_time_ms / 1000)
+        return (True, duration)
+    
+    return (False, 0)
+
+def detect_vsc(lap_time_ms, expected_lap_time_ms):
+    """
+    Detect Virtual Safety Car based on moderately slower lap
+    
+    Returns: (is_vsc, duration)
+    """
+    # VSC: Lap time 15-25% slower than expected
+    if 1.15 < (lap_time_ms / expected_lap_time_ms) < 1.30:
+        duration = int(lap_time_ms / 1000)
+        return (True, duration)
+    
+    return (False, 0)
+
 # ============================================
 # UDP SOCKET SETUP
 # ============================================
@@ -195,6 +261,7 @@ def main():
     
     # Track state (use manual configuration)
     current_tyre_compound = STARTING_TYRE
+    previous_tyre_compound = STARTING_TYRE
     current_fuel = 100.0
     tyre_age = 0
     
@@ -202,6 +269,12 @@ def main():
     previous_lap_time = 0.0
     max_lap_time_seen = 0.0
     lap_in_progress = False
+    
+    # Speed tracking (for safety car detection)
+    speed_samples = []
+    
+    # Expected lap time (rolling average of last 3 valid laps)
+    recent_lap_times = []
     
     # Telemetry sampling
     packet_count = 0
@@ -217,6 +290,12 @@ def main():
             
             if parsed is None:
                 continue
+            
+            # Track speed for safety car detection
+            if parsed['speed'] > 0:
+                speed_samples.append(parsed['speed'])
+                if len(speed_samples) > 100:  # Keep last 100 samples
+                    speed_samples.pop(0)
             
             # Create session on first packet
             if current_session_id is None:
@@ -262,6 +341,66 @@ def main():
                     is_valid
                 )
                 
+                # ========== STRATEGY EVENT DETECTION ==========
+                
+                # Calculate average speed for this lap
+                avg_speed = sum(speed_samples) / len(speed_samples) if speed_samples else 0
+                
+                # Calculate expected lap time (average of last 3 valid laps)
+                expected_lap_time = 75000  # Default 1:15
+                if len(recent_lap_times) >= 3:
+                    expected_lap_time = int(sum(recent_lap_times[-3:]) / 3)
+                
+                # Track recent valid lap times
+                if is_valid and MIN_VALID_LAP_TIME_MS <= lap_time_ms <= MAX_VALID_LAP_TIME_MS:
+                    recent_lap_times.append(lap_time_ms)
+                    if len(recent_lap_times) > 5:  # Keep last 5
+                        recent_lap_times.pop(0)
+                
+                # Detect tyre change
+                tyre_changed = (current_tyre_compound != previous_tyre_compound)
+                
+                # 1. PIT STOP DETECTION
+                is_pit_stop, pit_duration = detect_pit_stop(
+                    lap_time_ms, 
+                    tyre_changed, 
+                    previous_tyre_compound, 
+                    current_tyre_compound
+                )
+                if is_pit_stop:
+                    insert_strategy_event(conn, current_lap_id, "PitStop", pit_duration)
+                
+                # 2. SAFETY CAR DETECTION (only if not a pit stop)
+                if not is_pit_stop:
+                    is_safety_car, sc_duration = detect_safety_car(
+                        avg_speed, 
+                        lap_time_ms, 
+                        expected_lap_time
+                    )
+                    if is_safety_car:
+                        insert_strategy_event(conn, current_lap_id, "SafetyCar", sc_duration)
+                    
+                    # 3. VSC DETECTION (only if not safety car or pit stop)
+                    else:
+                        is_vsc, vsc_duration = detect_vsc(lap_time_ms, expected_lap_time)
+                        if is_vsc:
+                            insert_strategy_event(conn, current_lap_id, "VSC", vsc_duration)
+                
+                # 4. PENALTY DETECTION (invalid lap that's unusually slow)
+                if not is_valid and lap_time_ms > (expected_lap_time * 1.1):
+                    # Likely a penalty was applied (time added to lap)
+                    penalty_time = int((lap_time_ms - expected_lap_time) / 1000)
+                    if penalty_time > 5:  # At least 5 second penalty
+                        insert_strategy_event(conn, current_lap_id, "Penalty", penalty_time)
+                
+                # Update previous tyre compound
+                previous_tyre_compound = current_tyre_compound
+                
+                # Clear speed samples for next lap
+                speed_samples = []
+                
+                # ===============================================
+                
                 # Reset for next lap
                 max_lap_time_seen = 0.0
                 lap_in_progress = False
@@ -303,6 +442,27 @@ def main():
         print(f"Total packets: {packet_count}")
         print(f"Total laps captured: {last_lap_number}")
         print(f"Track: {TRACK_NAME}")
+        
+        # Query and display strategy events
+        try:
+            conn_check = get_db_connection()
+            cursor = conn_check.cursor()
+            cursor.execute("""
+                SELECT event_type, COUNT(*) as count 
+                FROM strategy_events 
+                GROUP BY event_type
+            """)
+            events = cursor.fetchall()
+            
+            if events:
+                print("\nSTRATEGY EVENTS LOGGED:")
+                for event_type, count in events:
+                    print(f"  {event_type}: {count}")
+            
+            cursor.close()
+            conn_check.close()
+        except:
+            pass
 
 if __name__ == "__main__":
     main()
