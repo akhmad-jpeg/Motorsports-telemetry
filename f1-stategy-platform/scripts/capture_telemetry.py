@@ -3,16 +3,12 @@ import struct
 import mysql.connector
 from datetime import datetime
 
-# ============================================
-# MANUAL CONFIGURATION (MODIFIED BY start_capture.bat)
-# ============================================
-TRACK_NAME = "spa"
-STARTING_TYRE = "supersoft"
-WEATHER = "clear"
+# MANUAL CONFIGURATION
+TRACK_NAME = "Sochi"
+STARTING_TYRE = "Ultrasoft"
+WEATHER = "Clear"
 
-# ============================================
 # DATABASE CONFIGURATION
-# ============================================
 UDP_IP = "0.0.0.0"
 UDP_PORT = 20777
 
@@ -32,37 +28,24 @@ MAX_VALID_LAP_TIME_MS = 180000  # 3 minutes maximum
 # Pit stop detection threshold
 PIT_STOP_LAP_TIME_MS = 90000    # Laps slower than 1:30 likely include pit stop
 
-# ============================================
+
 # DATABASE CONNECTION
-# ============================================
 def get_db_connection():
     """Connect to MySQL database"""
     conn = mysql.connector.connect(**DB_CONFIG)
     return conn
 
-# ============================================
 # F1 2017 LEGACY PACKET PARSING
-# ============================================
 def parse_legacy_packet(data):
-    """
-    Parse F1 2017 Legacy format packet (1289 bytes)
-    
-    Extracts:
-    - Lap time (RELIABLE)
-    - Speed (RELIABLE)
-    - Telemetry (BEST EFFORT - noisy but shows patterns)
-    """
-    
-    offset = 0
-    
+    offset = 0    
     try:
-        # Current lap time (bytes 4-7) - RELIABLE
+        # Current lap time (bytes 4-7) 
         current_lap_time = struct.unpack('<f', data[offset+4:offset+8])[0]
         
-        # Speed (bytes 28-31) - RELIABLE
+        # Speed (bytes 28-31) 
         speed = struct.unpack('<f', data[offset+28:offset+32])[0]
         
-        # === TELEMETRY (BEST EFFORT) ===
+        # Telemetry as clean as possible
         telem_offset = 52
         
         try:
@@ -74,7 +57,7 @@ def parse_legacy_packet(data):
             brake_raw = struct.unpack('<f', data[telem_offset+8:telem_offset+12])[0]
             brake = max(0.0, min(1.0, brake_raw))
             
-            # Gear (int8) - will be noisy
+            # Gear (int8)
             gear_raw = struct.unpack('<b', data[telem_offset+20:telem_offset+21])[0]
             gear = max(-1, min(8, gear_raw))
             
@@ -107,9 +90,7 @@ def parse_legacy_packet(data):
     except Exception as e:
         return None
 
-# ============================================
 # DATABASE INSERTION
-# ============================================
 def insert_session(conn, track_name, session_type, weather):
     """Insert a new session and return session_id"""
     cursor = conn.cursor()
@@ -172,8 +153,6 @@ def insert_strategy_event(conn, lap_id, event_type, duration_sec):
     cursor.close()
     
     print(f"[EVENT] {event_type} logged on lap {lap_id} (duration: {duration_sec}s)")
-
-# ============================================
 # STRATEGY EVENT DETECTION
 # ============================================
 def detect_pit_stop(lap_time_ms, tyre_changed, previous_tyre_compound, new_tyre_compound):
@@ -223,9 +202,7 @@ def detect_vsc(lap_time_ms, expected_lap_time_ms):
     
     return (False, 0)
 
-# ============================================
 # UDP SOCKET SETUP
-# ============================================
 def setup_udp_listener():
     """Create UDP socket listening on port 20777"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -233,9 +210,7 @@ def setup_udp_listener():
     print(f"[TELEMETRY] Listening on {UDP_IP}:{UDP_PORT}")
     return sock
 
-# ============================================
 # MAIN TELEMETRY CAPTURE LOOP
-# ============================================
 def main():
     """Main telemetry capture loop for F1 2017 Legacy format"""
     print("=" * 60)
