@@ -4,9 +4,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import os
 
-# ============================================
 # DATABASE CONNECTION
-# ============================================
 def get_db_connection():
     conn = mysql.connector.connect(
         host='localhost',
@@ -16,12 +14,9 @@ def get_db_connection():
     )
     return conn
 
-# ============================================
-# ANALYSIS FUNCTIONS
-# ============================================
 
+# ANALYSIS FUNCTIONS
 def get_session_summary(conn):
-    """Get summary of all sessions"""
     query = """
     SELECT 
         s.session_id,
@@ -40,7 +35,6 @@ def get_session_summary(conn):
     return pd.read_sql(query, conn)
 
 def get_tyre_degradation(conn, session_id):
-    """Analyze tyre degradation for a session"""
     query = f"""
     SELECT 
         tyre_age,
@@ -55,7 +49,6 @@ def get_tyre_degradation(conn, session_id):
     return pd.read_sql(query, conn)
 
 def get_lap_consistency(conn, session_id):
-    """Calculate lap time consistency"""
     query = f"""
     SELECT 
         lap_number,
@@ -70,7 +63,6 @@ def get_lap_consistency(conn, session_id):
     return pd.read_sql(query, conn)
 
 def get_speed_distribution(conn, session_id):
-    """Get speed distribution across laps"""
     query = f"""
     SELECT 
         t.speed,
@@ -81,12 +73,8 @@ def get_speed_distribution(conn, session_id):
     """
     return pd.read_sql(query, conn)
 
-# ============================================
 # VISUALIZATION
-# ============================================
-
 def plot_tyre_degradation(df, track_name, output_dir):
-    """Plot tyre degradation curve"""
     plt.figure(figsize=(12, 6))
     
     for compound in df['tyre_compound'].unique():
@@ -106,8 +94,8 @@ def plot_tyre_degradation(df, track_name, output_dir):
     print(f"[SAVED] {filename}")
     plt.close()
 
+
 def plot_lap_times(df, track_name, output_dir):
-    """Plot lap times across the session"""
     plt.figure(figsize=(14, 6))
     
     valid_laps = df[df['is_valid'] == 1]
@@ -139,7 +127,6 @@ def plot_lap_times(df, track_name, output_dir):
     plt.close()
 
 def plot_speed_distribution(df, track_name, output_dir):
-    """Plot speed distribution histogram"""
     plt.figure(figsize=(12, 6))
     
     plt.hist(df['speed'], bins=30, color='blue', alpha=0.7, edgecolor='black')
@@ -180,10 +167,8 @@ def save_summary_report(sessions, lap_stats, output_dir):
     
     print(f"[SAVED] {filename}")
 
-# ============================================
-# MAIN ANALYSIS
-# ============================================
 
+# MAIN ANALYSIS
 def main():
     print("=" * 60)
     print("F1 PERFORMANCE ANALYSIS")
