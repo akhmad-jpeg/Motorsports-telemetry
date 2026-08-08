@@ -2,13 +2,14 @@ import socket
 import struct
 import mysql.connector
 from datetime import datetime
+from fuel_estimation import estimate_fuel_load
 
 # MANUAL CONFIGURATION
 TRACK_NAME = "Sochi"
 STARTING_TYRE = "Ultrasoft"
 WEATHER = "Clear"
 
-# DATABASE CONFIGURATION
+# DATABASE CONFIGURATIONmake s
 UDP_IP = "0.0.0.0"
 UDP_PORT = 20777
 
@@ -237,7 +238,6 @@ def main():
     # Track state (use manual configuration)
     current_tyre_compound = STARTING_TYRE
     previous_tyre_compound = STARTING_TYRE
-    current_fuel = 100.0
     tyre_age = 0
     
     # Lap tracking
@@ -275,7 +275,10 @@ def main():
             # Create session on first packet
             if current_session_id is None:
                 current_session_id = insert_session(conn, TRACK_NAME, "Race", WEATHER)
-                current_lap_id = insert_lap(conn, current_session_id, 1, 90000, current_tyre_compound, 1, current_fuel, True)
+                current_lap_id = insert_lap(
+                    conn, current_session_id, 1, 90000, current_tyre_compound,
+                    1, estimate_fuel_load(1), True
+                )
                 last_lap_number = 1
                 tyre_age = 1
                 print("")
@@ -312,7 +315,7 @@ def main():
                     lap_time_ms,
                     current_tyre_compound,
                     tyre_age,
-                    current_fuel,
+                    estimate_fuel_load(last_lap_number),
                     is_valid
                 )
                 
