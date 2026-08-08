@@ -2,6 +2,7 @@ import joblib
 import pandas as pd
 import numpy as np
 import os
+from fuel_estimation import estimate_fuel_load
 
 print("=" * 60)
 print("F1 LAP TIME PREDICTOR")
@@ -41,7 +42,8 @@ print("=" * 60)
 # Get user input
 print("\nEnter race conditions:")
 tyre_age = int(input("Tyre age (laps): "))
-fuel_load = float(input("Fuel load (kg): "))
+lap_number = int(input("Lap number: "))
+fuel_load = estimate_fuel_load(lap_number)
 
 print("\n" + "=" * 60)
 print("TYRE COMPOUND SELECTION")
@@ -126,7 +128,8 @@ print("=" * 60)
 print(f"\nRace Conditions:")
 print(f"  Track:        {track_name.title()}")
 print(f"  Tyre:         {tyre_compound} (age {tyre_age})")
-print(f"  Fuel:         {fuel_load:.1f} kg")
+print(f"  Lap number:   {lap_number}")
+print(f"  Est. fuel:    {fuel_load:.1f} kg")
 print(f"\nPredicted Lap Time:")
 print(f"  {minutes}:{seconds:06.3f}")
 print(f"  ({predicted_time:.3f} seconds)")
