@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import joblib
 import os
 from datetime import datetime
+from fuel_estimation import estimate_fuel_load
 
 DB_CONFIG = {
     'host': 'localhost',
@@ -31,6 +32,7 @@ conn = get_db_connection()
 query = """
 SELECT 
     l.lap_time_ms / 1000 as lap_time,
+    l.lap_number,
     l.tyre_age,
     l.fuel_load,
     l.tyre_compound,
@@ -53,10 +55,10 @@ print(f"✓ Tyres:  {df['tyre_compound'].nunique()}")
 df['track_name']    = df['track_name'].str.strip().str.title()
 df['tyre_compound'] = df['tyre_compound'].str.strip()
 
-# Fill missing fuel load (estimate: start 100kg, burn 2kg/lap)
-if df['fuel_load'].isnull().any():
-    print("\n⚠ Estimating missing fuel_load (2kg/lap burn rate)")
-    df['fuel_load'] = df['fuel_load'].fillna(100 - (df['tyre_age'] * 2))
+# F1 2018 Legacy UDP does not expose fuel load. Rebuild this synthetic feature
+# from lap number for every row so historical, captured, and legacy rows agree.
+df['fuel_load'] = df['lap_number'].map(estimate_fuel_load)
+df = df.drop(columns=['lap_number'])
 
 print("\n[FEATURE ENGINEERING] One-hot encoding...")
 df_encoded = pd.get_dummies(df, columns=['tyre_compound', 'track_name'],
