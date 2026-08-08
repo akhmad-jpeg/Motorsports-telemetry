@@ -4,6 +4,7 @@ import joblib
 import pandas as pd
 import os
 import traceback
+from fuel_estimation import estimate_fuel_load
 
 app = Flask(__name__)
 
@@ -98,7 +99,7 @@ def get_session_laps(session_id):
 
         for lap in laps:
             lap['lap_time'] = float(lap['lap_time'])
-            lap['fuel_load'] = float(lap['fuel_load']) if lap['fuel_load'] else 0
+            lap['fuel_load'] = estimate_fuel_load(lap['lap_number'])
 
         return jsonify(laps)
     except Exception as e:
@@ -193,7 +194,8 @@ def predict_lap():
     try:
         body          = request.get_json()
         tyre_age      = float(body['tyre_age'])
-        fuel_load     = float(body['fuel_load'])
+        lap_number    = int(body['lap_number'])
+        fuel_load     = estimate_fuel_load(lap_number)
         tyre_compound = body['tyre_compound']
         track_name    = body['track_name']
 
@@ -221,17 +223,20 @@ def predict_lap():
             "track":          track_name,
             "tyre_compound":  tyre_compound,
             "tyre_age":       tyre_age,
+            "lap_number":     lap_number,
             "fuel_load":      fuel_load
         })
     except KeyError as e:
         return jsonify({"error": f"Missing field: {e}"}), 400
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
 # STRATEGY ADVISOR API
-def _stint_time(tyre, start_age, laps, track, fuel):
+def _stint_time(tyre, start_age, laps, track, start_lap_number):
     """Sum predicted lap times across a full stint."""
     tf = f'tyre_{tyre}'
     tkf = f'track_{track}'
@@ -241,7 +246,7 @@ def _stint_time(tyre, start_age, laps, track, fuel):
     for i in range(laps):
         row = pd.DataFrame(0, index=[0], columns=feature_names)
         row['tyre_age']  = start_age + i
-        row['fuel_load'] = max(40, fuel - i * 2)
+        row['fuel_load'] = estimate_fuel_load(start_lap_number + i)
         row[tf]  = 1
         row[tkf] = 1
         total += float(model.predict(row)[0])
@@ -280,13 +285,12 @@ def analyze_strategy():
         event        = body['event_type']
 
         laps_rem  = max(1, total_laps - cur_lap)
-        fuel      = max(40, 100 - cur_lap * 2)
         pit_loss  = 15 if event in ['VSC', 'SafetyCar'] else 25
 
         strategies = []
 
         # Stay out
-        t = _stint_time(cur_tyre, cur_age, laps_rem, track, fuel)
+        t = _stint_time(cur_tyre, cur_age, laps_rem, track, cur_lap)
         if t > 0:
             strategies.append({
                 "option":      "Stay Out",
@@ -297,7 +301,7 @@ def analyze_strategy():
             })
 
         # Pit — same compound
-        t = _stint_time(cur_tyre, 0, laps_rem, track, fuel) + pit_loss
+        t = _stint_time(cur_tyre, 0, laps_rem, track, cur_lap) + pit_loss
         if t > pit_loss:
             strategies.append({
                 "option":      f"Pit — Fresh {cur_tyre}",
@@ -312,7 +316,7 @@ def analyze_strategy():
         if cur_tyre in harder:
             alt = harder[cur_tyre]
             if f'tyre_{alt}' in feature_names and laps_rem > 8:
-                t = _stint_time(alt, 0, laps_rem, track, fuel) + pit_loss
+                t = _stint_time(alt, 0, laps_rem, track, cur_lap) + pit_loss
                 if t > pit_loss:
                     strategies.append({
                         "option":      f"Pit — Switch to {alt}",
@@ -327,7 +331,7 @@ def analyze_strategy():
         if cur_tyre in softer and laps_rem <= 15:
             alt = softer[cur_tyre]
             if f'tyre_{alt}' in feature_names:
-                t = _stint_time(alt, 0, laps_rem, track, fuel) + pit_loss
+                t = _stint_time(alt, 0, laps_rem, track, cur_lap) + pit_loss
                 if t > pit_loss:
                     strategies.append({
                         "option":      f"Pit — Switch to {alt}",
@@ -341,7 +345,7 @@ def analyze_strategy():
         if event == 'Rain':
             for rain in ['Intermediate', 'Wet']:
                 if f'tyre_{rain}' in feature_names:
-                    t = _stint_time(rain, 0, laps_rem, track, fuel) + pit_loss
+                    t = _stint_time(rain, 0, laps_rem, track, cur_lap) + pit_loss
                     if t > pit_loss:
                         strategies.append({
                             "option":      f"Pit — {rain}",
