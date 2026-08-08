@@ -3,6 +3,7 @@ import mysql.connector
 from datetime import datetime
 import pandas as pd
 import os
+from fuel_estimation import estimate_fuel_load
 
 # Create cache directory if it doesn't exist
 cache_dir = 'f1_cache'
@@ -109,8 +110,9 @@ def import_race(year, race_name, session_type='R'):
             # Insert lap
             cursor.execute("""
                 INSERT INTO laps (session_id, lap_number, lap_time_ms, tyre_compound, tyre_age, fuel_load, is_valid)
-                VALUES (%s, %s, %s, %s, %s, 100.0, 1)
-            """, (session_id, lap_num, lap_time_ms, compound, tyre_life))
+                VALUES (%s, %s, %s, %s, %s, %s, 1)
+            """, (session_id, lap_num, lap_time_ms, compound, tyre_life,
+                  estimate_fuel_load(lap_num)))
             
             lap_id = cursor.lastrowid
             count += 1
