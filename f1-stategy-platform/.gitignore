@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local configuration and secrets
+.env
+.env.*
+!/.env.example
+config.ini
+
+# Generated FastF1 cache and application outputs
+f1_cache/
+scripts/f1_cache/
+scripts/analysis/
+analysis/
+
+# Generated model artifacts; build or publish them through a versioned release process
+scripts/ml_models/
+ml_models/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
