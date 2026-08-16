@@ -21,8 +21,10 @@ analysis/
 scripts/ml_models/
 ml_models/
 
-# Editor and operating-system files
+# Editor, tooling and operating-system files
 .vscode/
 .idea/
+.cursor/
+.freebuff/
 .DS_Store
 Thumbs.db

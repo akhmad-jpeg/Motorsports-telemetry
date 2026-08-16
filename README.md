@@ -1,1 +1,7 @@
-This project is an F1 race strategy and telemetry analysis platform designed around real Formula 1 regulations and race structure. It stores session data, lap times, tyre compounds, fuel usage, telemetry metrics, and strategy events such as pit stops and safety cars in a structured MySQL database. The system is built to work with both F1 2018 game telemetry and real-world race data, allowing comparative analysis, strategy evaluation, and future data-driven modelling across Formula 1 and other motorsport series.
+# Motorsports Telemetry
+
+F1 race strategy and telemetry analytics platform — live UDP capture, FastF1 race import, MySQL storage, a Flask dashboard, and a LinearRegression lap-time model with strategy advice.
+
+The project lives in **[`f1-stategy-platform/`](f1-stategy-platform/)** — see its [README](f1-stategy-platform/README.md) for setup, usage, architecture, and testing.
+
+Project reports and presentation files are in [`docs/`](docs/).

@@ -1,13 +1,10 @@
 from flask import Flask, render_template, jsonify, request
-import mysql.connector
 import joblib
-import pandas as pd
-import os
 import json
 import traceback
 from pathlib import Path
 from fuel_estimation import estimate_fuel_load
-from config import get_db_connection, DB_CONFIG
+from config import get_db_connection
 from stint_analysis import detrend_laps
 from feature_pipeline import (
     construct_prediction_input,

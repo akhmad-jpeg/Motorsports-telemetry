@@ -1,10 +1,9 @@
-import mysql.connector
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime
 import os
 
-from config import get_db_connection, DB_CONFIG
+from config import get_db_connection
 from stint_analysis import detrend_laps
 
 
