@@ -16,9 +16,10 @@ A data pipeline that captures live telemetry from F1 2018 (UDP, Legacy format), 
 - 🎮 Real-time UDP telemetry capture with correct F1 2018 Legacy packet parsing
 - 🏁 Real race data import (FastF1) with pit-stop event reconciliation and race-control extraction (SC/VSC/red flag)
 - 💾 Normalized MySQL schema (`database/schema.sql`)
-- 📊 Flask dashboard: lap times, fuel-adjusted tyre degradation, speed distribution, strategy events
+- 📊 Flask dashboard: lap times, fuel-adjusted tyre degradation (pit in/out laps marked as visible spikes), speed distribution, strategy events
 - 🤖 LinearRegression lap-time model with explicit unseen-track rejection
-- 🧪 137 unit tests, all mocked against the DB so CI needs no MySQL
+- 🖱️ One-click Windows launchers for every pipeline step — setup, import, train, serve, capture
+- 🧪 142 unit tests, all mocked against the DB so CI needs no MySQL
 
 ---
 
@@ -55,6 +56,26 @@ SOURCE database/schema.sql;
 4. **Configure MySQL credentials** — defaults are `root` / `password` on `localhost`/`3306`; override with the `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_PORT` environment variables (`scripts/config.py`).
 
 ### Usage
+
+**One-click launchers (recommended)** — double-click any file in `launchers/`; each one handles the Python/venv plumbing itself:
+
+| Step | Launcher |
+|---|---|
+| Install dependencies into `.venv` | `launchers\01_setup_dependencies.bat` |
+| Import one race (interactive) | `launchers\02_import_race.bat` |
+| Batch-import races/seasons | `launchers\03_import_dataset.bat` |
+| Audit / repair pit events | `launchers\04_audit_pit_events.bat` |
+| Train the lap-time model | `launchers\05_train_model.bat` |
+| Start the dashboard | `launchers\06_run_server.bat` |
+| Live UDP telemetry capture | `launchers\07_capture_telemetry.bat` |
+| Interactive lap-time prediction | `launchers\08_predict_lap_times.bat` |
+| Performance analysis reports | `launchers\09_analyze_performance.bat` |
+| Model-selection benchmark | `launchers\10_benchmark_models.bat` |
+| Run the test suite | `launchers\11_run_tests.bat` |
+
+Run them in numbered order the first time (01 → 06). The full table lives in `launchers/README.md`.
+
+The same steps are available as plain Python commands (e.g. on non-Windows or for scripting):
 
 **Live capture (F1 2018, Legacy UDP on port 20777):**
 ```bash
@@ -111,7 +132,7 @@ Key modules in `scripts/`:
 | `import_f1_race.py` / `import_f1_dataset.py` | FastF1 race import; tyre compounds, pit events, race-control extraction, 2025 calendar |
 | `cleanup_pit_events.py` | Audit + repair tool: purge spurious pit events, insert missing ones, re-validate lap validity (dry-run by default, `--apply` to write) |
 | `stint_analysis.py` | Per-stint detrending so tyre wear is visible despite fuel burn (shared by dashboard + CLI) |
-| `dashboard.py` / `run_server.py` | Flask web app and its production entry point |
+| `dashboard.py` / `run_server.py` | Flask web app and its production entry point (prints a clickable localhost link) |
 | `analyze_performance.py` | CLI charts and summary reports |
 | `ml_lap_predictions.py` / `feature_pipeline.py` | Model training and feature engineering |
 | `predict_lap_times.py` | Interactive lap-time prediction / strategy advisor CLI |
@@ -135,7 +156,7 @@ Key modules in `scripts/`:
 python -m unittest discover -s tests
 ```
 
-137 tests covering the packet parser (against the real spec byte offsets), race-control extraction, stint analysis, pit-event reconciliation, importer behavior, dashboard API, and capture liveness. All DB access is mocked; CI runs the same command on Python 3.13.
+142 tests covering the packet parser (against the real spec byte offsets), race-control extraction, stint analysis (incl. pit-lap chart markers), pit-event reconciliation, importer behavior, dashboard API, the server startup banner, and capture liveness. All DB access is mocked; CI runs the same command on Python 3.13.
 
 ---
 
@@ -147,7 +168,8 @@ f1-stategy-platform/
 ├── scripts/                   # capture, import, analysis, model, dashboard
 │   ├── templates/dashboard.html
 │   └── start_telemetry.bat
-├── tests/                     # 137 unit tests
+├── launchers/                 # one-click .bat files for every pipeline step
+├── tests/                     # 142 unit tests
 ├── requirements.txt           # pinned dependencies
 └── .github/workflows/ci.yml   # CI: install + run tests
 ```
