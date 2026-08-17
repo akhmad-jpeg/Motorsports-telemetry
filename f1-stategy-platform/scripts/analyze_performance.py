@@ -234,7 +234,10 @@ def main():
     
     # Analyze selected session
     selected_session = sessions.iloc[choice]
-    session_id = selected_session['session_id']
+    # pd.read_sql returns numpy types; the mysql-connector C cursor cannot
+    # bind a numpy.int64 as a query parameter, so convert to a plain int
+    # before passing it to any parameterised query below.
+    session_id = int(selected_session['session_id'])
     track_name = selected_session['track_name']
     
     # Create output directory
