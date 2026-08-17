@@ -53,7 +53,7 @@ USE f1_strategy;
 SOURCE database/schema.sql;
 ```
 
-4. **Configure MySQL credentials** — defaults are `root` / `password` on `localhost`/`3306`; override with the `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_PORT` environment variables (`scripts/config.py`).
+4. **Configure MySQL credentials** — the app reads `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_PORT` from the environment (`scripts/config.py`). Defaults are `localhost` / `root` / `f1_strategy` / `3306`, but the password has **no** default: it starts as the placeholder `CHANGE_ME` and the app refuses to connect until you set `DB_PASSWORD` (e.g. `set DB_PASSWORD=yourpassword` on Windows, or `export DB_PASSWORD=yourpassword` on Linux/macOS).
 
 ### Usage
 
