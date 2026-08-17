@@ -88,6 +88,13 @@ def segment_stints(laps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             current = {
                 "stint_number": (current["stint_number"] + 1) if current else 1,
                 "compound": lap.get("tyre_compound") or "Unknown",
+                # Only a stint that directly follows a pit stop has an
+                # out-lap as its first lap.  A stint that starts from a
+                # compound change or an age reset mid-race (no pit) begins
+                # with a normal lap that must be kept.
+                "started_after_pit": bool(
+                    prev is not None and prev.get("has_pit_stop")
+                ),
                 "laps": [],
             }
             stints.append(current)
@@ -116,13 +123,12 @@ def _detrend_stint(stint: Dict[str, Any]) -> None:
     """Fill ``stint_number`` / ``stint_delta`` on every lap of one stint."""
     laps = stint["laps"]
 
-    # In-lap (pit lane) and the following out-lap are excluded from the
-    # chart -- they are transition laps, not representative pace.
-    in_lap_idx = {i for i, l in enumerate(laps) if l.get("has_pit_stop")}
-    out_lap_idx = {i + 1 for i in in_lap_idx}
-    if stint["stint_number"] > 1 and laps:  # first lap after a pit is an out-lap
-        out_lap_idx.add(0)
-    excluded = in_lap_idx | out_lap_idx
+    # The in-lap (pit lane) is excluded from the chart -- a transition lap,
+    # not representative pace.  The out-lap is the first lap of the stint
+    # that follows, but only when that stint really follows a pit stop.
+    excluded = {i for i, l in enumerate(laps) if l.get("has_pit_stop")}
+    if stint.get("started_after_pit") and laps:
+        excluded.add(0)
 
     def usable_for_delta(l: Dict[str, Any]) -> bool:
         return (
@@ -155,7 +161,22 @@ def _detrend_stint(stint: Dict[str, Any]) -> None:
     for i, l in enumerate(laps):
         l["stint_number"] = stint["stint_number"]
         if i in excluded:
+            # Pit in/out laps are transition laps, not pace -- so they stay
+            # out of the fit and carry no pace delta (stint_delta).  But
+            # give them a pit_delta: their offset from the stint's pace
+            # line, so the chart can plot the pit stop as a visible spike
+            # instead of a hole in the line.
+            l["is_pit_lap"] = 1
             l["stint_delta"] = None
+            if _num(l.get("lap_time")) is None or _num(l.get("tyre_age")) is None:
+                l["pit_delta"] = None
+            elif trend is not None:
+                slope, intercept = trend
+                l["pit_delta"] = float(
+                    _num(l["lap_time"]) - (intercept + slope * _num(l["tyre_age"]))
+                )
+            else:
+                l["pit_delta"] = float(_num(l["lap_time"]) - fallback)
         elif _num(l.get("lap_time")) is None or _num(l.get("tyre_age")) is None:
             l["stint_delta"] = None
         elif trend is not None:
@@ -172,8 +193,10 @@ def detrend_laps(laps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Return copies of ``laps`` with ``stint_number`` and ``stint_delta``.
 
     ``stint_delta`` is seconds relative to the stint's own pace line
-    (fuel-corrected); None marks laps that carry no meaningful delta
-    (pit in/out laps, laps without a tyre age, or single-lap stints).
+    (fuel-corrected); None marks laps that carry no meaningful pace delta
+    (laps without a tyre age, or single-lap stints).  Pit in/out laps
+    carry ``is_pit_lap=1`` and a separate ``pit_delta`` (their offset from
+    the pace line, for visualization) instead of a pace delta.
     """
     out = [dict(l) for l in laps]
     for stint in segment_stints(out):

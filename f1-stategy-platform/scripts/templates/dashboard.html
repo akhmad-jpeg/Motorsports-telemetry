@@ -98,6 +98,7 @@
         }
         .chart-card::before { content:''; position:absolute; top:0; left:0; width:44px; height:2px; background:var(--teal); }
         .chart-title { font-weight:700; font-size:0.78em; letter-spacing:3px; text-transform:uppercase; color:var(--text); margin-bottom:18px; }
+        .chart-note { margin-top:10px; font-family:'Share Tech Mono',monospace; font-size:0.68em; letter-spacing:1px; color:#777; }
         canvas { width:100%!important; height:230px!important; }
         .no-data {
             display:flex; align-items:center; justify-content:center; height:230px;
@@ -313,6 +314,7 @@
                 <div class="chart-title">Tyre Degradation (Fuel-Adjusted)</div>
                 <div id="tyreNoData" class="no-data">SELECT A SESSION</div>
                 <canvas id="tyreChart" style="display:none"></canvas>
+                <div class="chart-note" id="tyreChartNote" style="display:none">◆ pit in / pit out laps</div>
             </div>
         </div>
         <div>
@@ -466,6 +468,8 @@ const TYRE_COLORS = {
     Soft:'#ffdd00', Medium:'#dddddd', Hard:'#4fc3f7',
     Intermediate:'#00c853', Wet:'#0091ea'
 };
+// Amber diamond markers for pit in/out laps on the tyre chart.
+const PIT_COLOR = '#ffa726';
 
 let lapChart = null, tyreChart = null;
 let currentSessionId = null;
@@ -578,7 +582,11 @@ function initCharts() {
                                     rawStr = ` - raw ${fmtTime(parseFloat(raw))}`;
                                 }
                             }
-                            return `  ${ctx.dataset.label}: ${sign}${delta.toFixed(2)}s${ageStr}${rawStr}`;
+                            const scrub = (lap && lap.is_valid !== undefined && lap.is_valid != 1) ? ' · scrubbed' : '';
+                            const pitTag = (lap && lap.is_pit_lap)
+                                ? ((lap.has_pit_stop == 1) ? ' · pit in' : ' · pit out')
+                                : '';
+                            return `  ${ctx.dataset.label}: ${sign}${delta.toFixed(2)}s${ageStr}${rawStr}${scrub}${pitTag}`;
                         }
                     }
                 }
@@ -730,11 +738,13 @@ async function loadTyreChart(id) {
             noData.textContent = 'NO TYRE DATA';
             noData.style.display = 'flex';
             canvas.style.display = 'none';
+            document.getElementById('tyreChartNote').style.display = 'none';
             return;
         }
 
         noData.style.display = 'none';
         canvas.style.display = 'block';
+        document.getElementById('tyreChartNote').style.display = 'block';
 
         // Sort data by lap_number
         const laps = data.slice().sort((a, b) => (parseInt(a.lap_number) || 0) - (parseInt(b.lap_number) || 0));
@@ -793,15 +803,37 @@ async function loadTyreChart(id) {
             // Plot the fuel-adjusted delta vs the stint's own pace line
             // (lap.stint_delta, computed server-side).  Pit in/out laps and
             // laps without a meaningful delta arrive as null -> no point.
+            // Race-control-scrubbed laps (is_valid = 0) still carry a real
+            // delta and are plotted too -- dropping them left random holes
+            // in the line.  The trend fit already ignores them.
             const stintNumericData = allLapNumbers.map(num => {
                 const lap = stint.lapMap[num];
-                if (lap && (lap.is_valid == 1 || lap.is_valid === true)) {
-                    const delta = parseFloat(lap.stint_delta);
+                if (lap) {
+                    // Pit in/out laps carry a separate pit_delta (their
+                    // offset from the pace line, for visualization) so a
+                    // pit stop reads as a visible spike; pace laps use
+                    // stint_delta.
+                    const raw = lap.is_pit_lap ? lap.pit_delta : lap.stint_delta;
+                    const delta = parseFloat(raw);
                     if (!isNaN(delta)) {
                         return delta;
                     }
                 }
                 return null;
+            });
+            // Pit in/out laps get amber diamond markers, pace laps get the
+            // stint's circular markers.
+            const pointStyles = allLapNumbers.map(num => {
+                const lap = stint.lapMap[num];
+                return (lap && lap.is_pit_lap) ? 'rectRot' : 'circle';
+            });
+            const pointRadii = allLapNumbers.map(num => {
+                const lap = stint.lapMap[num];
+                return (lap && lap.is_pit_lap) ? 6 : 4;
+            });
+            const pointColors = allLapNumbers.map(num => {
+                const lap = stint.lapMap[num];
+                return (lap && lap.is_pit_lap) ? PIT_COLOR : color;
             });
 
             return {
@@ -809,9 +841,10 @@ async function loadTyreChart(id) {
                 borderColor: color,
                 backgroundColor: 'transparent',
                 borderWidth: 2,
-                pointRadius: 4,
-                pointBackgroundColor: color,
-                pointBorderColor: color,
+                pointStyle: pointStyles,
+                pointRadius: pointRadii,
+                pointBackgroundColor: pointColors,
+                pointBorderColor: pointColors,
                 tension: 0.3,
                 spanGaps: false, // Critical: do NOT connect lines across stints/pit stops
                 data: stintNumericData
@@ -826,6 +859,7 @@ async function loadTyreChart(id) {
         noData.textContent = `ERROR: ${e.message}`;
         noData.style.display = 'flex';
         canvas.style.display = 'none';
+        document.getElementById('tyreChartNote').style.display = 'none';
     }
 }
 

@@ -118,6 +118,45 @@ class PitLapExclusionTests(unittest.TestCase):
         self.assertIsNotNone(by_num[3]['stint_delta'])
         self.assertIsNotNone(by_num[6]['stint_delta'])
 
+    def test_pit_laps_are_flagged_with_a_visual_spike(self):
+        # Pit in/out laps must still be visible on the chart: they get an
+        # is_pit_lap flag and a pit_delta (offset from the pace line) so
+        # the pit stop reads as a spike instead of a hole, while staying
+        # out of the pace delta.
+        laps = [
+            lap(1, 90.0, age=1), lap(2, 88.0, age=2), lap(3, 86.0, age=3),
+            lap(4, 105.0, age=4, pit=1),            # in-lap
+            lap(5, 89.0, age=1),                    # out-lap (new stint)
+            lap(6, 86.5, age=2), lap(7, 86.0, age=3),
+        ]
+        out = detrend_laps(laps)
+        by_num = {l['lap_number']: l for l in out}
+        self.assertEqual(by_num[4]['is_pit_lap'], 1)
+        self.assertEqual(by_num[5]['is_pit_lap'], 1)
+        self.assertIsNone(by_num[4]['stint_delta'])   # not a pace delta
+        self.assertIsNone(by_num[5]['stint_delta'])
+        self.assertGreater(by_num[4]['pit_delta'], 10.0)  # in-lap spike
+        self.assertGreater(by_num[5]['pit_delta'], 0.0)   # out-lap spike
+        # Normal laps are untouched.
+        self.assertNotIn('is_pit_lap', by_num[3])
+        self.assertNotIn('pit_delta', by_num[6])
+
+    def test_first_lap_of_non_pit_stint_is_kept(self):
+        # A stint can start without a pit stop -- a mid-race compound change
+        # or a deleted lap in between.  Its first lap is a normal lap, not
+        # an out-lap, and must keep a delta (regression: Monaco lap 3 was
+        # wrongly dropped, leaving a random hole in the chart).
+        laps = [
+            lap(1, 90.0, 'Soft', 1),
+            lap(2, 88.0, 'Hard', 1),   # compound change, no pit -> new stint
+            lap(3, 86.5, 'Hard', 2),
+            lap(4, 86.0, 'Hard', 3),
+        ]
+        out = detrend_laps(laps)
+        by_num = {l['lap_number']: l for l in out}
+        self.assertIsNotNone(by_num[2]['stint_delta'])
+        self.assertEqual(by_num[2]['stint_number'], 2)
+
     def test_short_stint_falls_back_to_median_delta(self):
         # Two-lap stint: no trend fit possible, deltas split around median.
         laps = [lap(1, 90.0, age=5), lap(2, 92.0, age=6)]
