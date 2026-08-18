@@ -49,9 +49,14 @@ SELECT
     l.tyre_age,
     l.tyre_compound,
     l.session_id,
-    s.track_name
+    s.track_name,
+    s.date AS session_date,
+    l.driver_id,
+    d.driver_code,
+    COALESCE(d.driver_name, d.driver_code) AS driver_name
 FROM laps l
 JOIN sessions s ON l.session_id = s.session_id
+LEFT JOIN drivers d ON l.driver_id = d.driver_id
 WHERE l.is_valid = 1
   AND l.lap_time_ms BETWEEN 60000 AND 180000
   -- Pit in-lap: the lap carrying a real PitStop event
@@ -79,6 +84,61 @@ SC_VSC_REDFLAG_RATIO = 1.30
 # Cold-tyre / traffic / race-start laps dropped from the start of each stint.
 STINT_WARMUP_LAPS = 2
 
+# A driver needs at least this many CLEAN training laps to get their own
+# model.  Below that the model is too noisy to be a meaningful signature.
+MIN_DRIVER_LAPS = 60
+
+
+def clean_training_data(df, verbose=True, label="Training data"):
+    """Return the cleaned training DataFrame for a driver subset (or all).
+
+    Applies the shared cleaning used by the global model and every
+    per-driver model:
+
+      * normalises track/tyre casing
+      * drops the first STINT_WARMUP_LAPS laps of each stint
+      * drops SC/VSC/red-flag/formation laps (> SC_VSC_REDFLAG_RATIO x the
+        session's median lap time)
+
+    Stints are detected per (session, driver): one driver's pit stop must
+    never split another driver's stint, which is why the global model also
+    groups by driver_id here.
+    """
+    df = df.copy()
+    df['track_name']    = df['track_name'].str.strip().str.title()
+    df['tyre_compound'] = df['tyre_compound'].str.strip()
+
+    # -------------------------------------------------------------------
+    # Drop the first STINT_WARMUP_LAPS laps of every stint.  A stint is a
+    # run of consecutive laps on the same compound within a session (and
+    # driver).  These opening laps are distorted by cold tyres, race-start
+    # traffic and tyre warm-up, and were the main driver of the old model's
+    # bogus "laps get faster as tyres age" coefficient.
+    # -------------------------------------------------------------------
+    df = df.sort_values(['session_id', 'driver_id', 'lap_number'])
+    df['_stint'] = (
+        df['tyre_compound'] != df.groupby(['session_id', 'driver_id'])['tyre_compound'].shift()
+    ).groupby([df['session_id'], df['driver_id']]).cumsum()
+    df['_lap_in_stint'] = df.groupby(['session_id', 'driver_id', '_stint']).cumcount()
+    warmup_mask = df['_lap_in_stint'] < STINT_WARMUP_LAPS
+    df = df[~warmup_mask].drop(columns=['_stint', '_lap_in_stint', 'lap_number'])
+    if verbose:
+        print(f"[INFO] Excluded {int(warmup_mask.sum())} stint warm-up laps "
+              f"(first {STINT_WARMUP_LAPS} laps of each stint)")
+
+    # -------------------------------------------------------------------
+    # SC / VSC / red-flag lap exclusion (session-relative outlier filter)
+    # -------------------------------------------------------------------
+    session_medians = df.groupby('session_id')['lap_time'].transform('median')
+    outlier_mask = df['lap_time'] <= session_medians * SC_VSC_REDFLAG_RATIO
+    dropped_outliers = int((~outlier_mask).sum())
+    df = df[outlier_mask]
+    if verbose:
+        print(f"[INFO] Excluded {dropped_outliers} SC/VSC/red-flag/formation laps "
+              f"(> {SC_VSC_REDFLAG_RATIO:.2f}x session median)")
+    return df
+
+
 print("=" * 60)
 print("F1 LAP TIME PREDICTION - MODEL TRAINING")
 print("=" * 60)
@@ -95,37 +155,11 @@ if df.empty:
 
 print(f"[INFO] Raw candidate laps: {len(df)}")
 
-# Normalise text columns
-df['track_name']    = df['track_name'].str.strip().str.title()
-df['tyre_compound'] = df['tyre_compound'].str.strip()
+# Keep a pre-cleaning copy so each driver's model re-runs the stint warm-up
+# and outlier filters on their OWN laps (grouped by session + driver).
+raw_df = df.copy()
 
-# ---------------------------------------------------------------------------
-# Drop the first STINT_WARMUP_LAPS laps of every stint.  A stint is a run of
-# consecutive laps on the same compound within a session.  These opening laps
-# are distorted by cold tyres, race-start traffic and tyre warm-up, and were
-# the main driver of the old model's bogus "laps get faster as tyres age"
-# coefficient.
-# ---------------------------------------------------------------------------
-df = df.sort_values(['session_id', 'lap_number'])
-df['_stint'] = (
-    df['tyre_compound'] != df.groupby('session_id')['tyre_compound'].shift()
-).groupby(df['session_id']).cumsum()
-df['_lap_in_stint'] = df.groupby(['session_id', '_stint']).cumcount()
-warmup_mask = df['_lap_in_stint'] < STINT_WARMUP_LAPS
-df = df[~warmup_mask].drop(columns=['_stint', '_lap_in_stint', 'lap_number'])
-print(f"[INFO] Excluded {int(warmup_mask.sum())} stint warm-up laps "
-      f"(first {STINT_WARMUP_LAPS} laps of each stint)")
-
-# ---------------------------------------------------------------------------
-# SC / VSC / red-flag lap exclusion (session-relative outlier filter)
-# ---------------------------------------------------------------------------
-session_medians = df.groupby('session_id')['lap_time'].transform('median')
-outlier_mask = df['lap_time'] <= session_medians * SC_VSC_REDFLAG_RATIO
-dropped_outliers = int((~outlier_mask).sum())
-df = df[outlier_mask]
-
-print(f"[INFO] Excluded {dropped_outliers} SC/VSC/red-flag/formation laps "
-      f"(> {SC_VSC_REDFLAG_RATIO:.2f}x session median)")
+df = clean_training_data(df)
 print(f"[INFO] Training laps after cleaning: {len(df)}")
 print(f"[INFO] Tracks covered: {df['track_name'].nunique()} — {sorted(df['track_name'].unique())}")
 print(f"[INFO] Tyres:  {df['tyre_compound'].nunique()}")
@@ -145,7 +179,8 @@ df_encoded = pd.get_dummies(df, columns=['tyre_compound', 'track_name'], prefix=
 
 y = df_encoded['lap_time']
 groups = df_encoded['session_id']
-X = df_encoded.drop(columns=['lap_time', 'session_id'])
+X = df_encoded.drop(columns=['lap_time', 'session_id', 'driver_id', 'driver_code',
+                              'driver_name', 'session_date'])
 feature_names = list(X.columns)
 
 print(f"[INFO] Feature Count: {len(feature_names)}")
@@ -315,6 +350,184 @@ metadata = {
 with open(MODEL_DIR / 'model_info.json', 'w', encoding='utf-8') as f_json:
     json.dump(metadata, f_json, indent=2, ensure_ascii=False)
 print(f"[INFO] Saved: {MODEL_DIR / 'model_info.json'}")
+
+# ---------------------------------------------------------------------------
+# Per-driver models
+#
+# One model per driver, trained on the driver's OWN race laps with the same
+# cleaning + feature pipeline as the global model.  Each driver model covers
+# only the tracks/tyres that driver has raced, which is exactly what makes
+# a head-to-head comparison meaningful: on a shared (track, tyre) the
+# difference between two drivers' predicted times is their pace gap.
+# ---------------------------------------------------------------------------
+print("\n" + "=" * 60)
+print("PER-DRIVER MODELS")
+print("=" * 60)
+print(f"  Training one model per driver with >= {MIN_DRIVER_LAPS} clean laps.")
+print("  Artifacts: ml_models\\drivers\\<driver_code>\\")
+
+drivers_dir = MODEL_DIR / 'drivers'
+drivers_dir.mkdir(parents=True, exist_ok=True)
+
+driver_summary = []
+# NULL driver ids (telemetry-only laps) are dropped by groupby's dropna.
+for (driver_code, driver_name), grp in raw_df.groupby(['driver_code', 'driver_name']):
+    grp_clean = clean_training_data(grp, verbose=False)
+    if len(grp_clean) < MIN_DRIVER_LAPS:
+        print(f"  [SKIP ] {str(driver_code):<4} {str(driver_name):<24} "
+              f"only {len(grp_clean)} clean laps (< {MIN_DRIVER_LAPS})")
+        continue
+
+    df_enc = pd.get_dummies(grp_clean, columns=['tyre_compound', 'track_name'],
+                            prefix=['tyre', 'track'])
+    y_drv = df_enc['lap_time']
+    drop_cols = [c for c in ('lap_time', 'session_id', 'driver_id', 'driver_code',
+                             'driver_name', 'session_date')
+                 if c in df_enc.columns]
+    X_drv = df_enc.drop(columns=drop_cols)
+    drv_features = list(X_drv.columns)
+
+    X_tr, X_te, y_tr, y_te = train_test_split(X_drv, y_drv, test_size=0.2, random_state=42)
+    within_drv = train_and_eval(X_tr, y_tr, X_te, y_te)
+    drv_best = min(within_drv, key=lambda k: within_drv[k][1]['mae'])
+    drv_model = within_drv[drv_best][0]
+    drv_metrics = within_drv[drv_best][1]
+
+    drv_lr = within_drv['LinearRegression'][0]
+    drv_coefs = dict(zip(drv_features, drv_lr.coef_))
+    drv_fuel_burn = min(0.0, drv_coefs.get('tyre_age', 0.0))
+
+    drv_tracks = sorted(f.replace('track_', '') for f in drv_features if f.startswith('track_'))
+    drv_tyres = sorted(f.replace('tyre_', '') for f in drv_features
+                       if f.startswith('tyre_') and f not in ('tyre_age', 'tyre_load'))
+
+    ddir = drivers_dir / str(driver_code)
+    ddir.mkdir(parents=True, exist_ok=True)
+    joblib.dump(drv_model, ddir / 'best_model.pkl')
+    joblib.dump(drv_features, ddir / 'feature_names.pkl')
+
+    drv_info = {
+        "driver": {"code": str(driver_code), "name": str(driver_name)},
+        "best_model": drv_best,
+        "metrics": {"within_track": {k: round(v, 4) for k, v in drv_metrics.items()
+                                     if k not in ('predictions', 'y_test')}},
+        "training_samples": int(len(X_tr)),
+        "test_samples": int(len(X_te)),
+        "clean_laps": int(len(grp_clean)),
+        "features": drv_features,
+        "coverage": {"tracks": drv_tracks, "tyres": drv_tyres},
+        "tyre_age_coefficient": round(drv_coefs.get('tyre_age', 0.0), 4),
+        "fuel_burn_rate": round(drv_fuel_burn, 4),
+        "trained_at": datetime.now().isoformat()
+    }
+    with open(ddir / 'model_info.json', 'w', encoding='utf-8') as f:
+        json.dump(drv_info, f, indent=2, ensure_ascii=False)
+
+    driver_summary.append((str(driver_code), str(driver_name), len(grp_clean),
+                           len(drv_tracks), drv_best, drv_metrics['mae']))
+    print(f"  [TRAIN] {str(driver_code):<4} {str(driver_name):<24} "
+          f"laps={len(grp_clean):>5} tracks={len(drv_tracks):>2} "
+          f"model={drv_best:<16} MAE={drv_metrics['mae']:.3f}s")
+
+# -----------------------------------------------------------------------
+# Per-driver-per-year models
+#
+# One model per (driver, season) pair, trained on that driver's own race
+# laps from that specific year.  Same pipeline as the global model, but
+# the intercept now absorbs the driver + car + regulations of that exact
+# season, so cross-year comparisons mix car changes with driver pace.
+# These models are stored in:
+#   ml_models/drivers/<code>/<year>/
+# and are the primary comparison unit in the dashboard (same-year =
+# apples-to-apples).  The per-driver aggregate model in
+# ml_models/drivers/<code>/ is kept as a fallback for drivers with only
+# one year of data, and for multi-year 'career shape' queries.
+# -----------------------------------------------------------------------
+MIN_YEAR_LAPS = 60
+
+print("\n" + "=" * 60)
+print("PER-DRIVER-PER-YEAR MODELS")
+print("=" * 60)
+print(f"  Training one model per (driver, year) with >= {MIN_YEAR_LAPS} clean laps.")
+print("  Artifacts: ml_models\\drivers\\<driver_code>\\<year>\\")
+
+year_summary = []
+for (driver_code, driver_name), grp in raw_df.groupby(['driver_code', 'driver_name']):
+    if pd.isna(driver_code):
+        continue
+    # session_date is in the query result; extract year for grouping
+    grp = grp.copy()
+    grp['_year'] = pd.to_datetime(grp['session_date'], errors='coerce').dt.year
+    for year, year_grp in grp.groupby('_year'):
+        if pd.isna(year):
+            continue
+        year_int = int(year)
+        year_clean = clean_training_data(year_grp, verbose=False)
+        if len(year_clean) < MIN_YEAR_LAPS:
+            continue
+
+        df_enc = pd.get_dummies(year_clean, columns=['tyre_compound', 'track_name'],
+                                prefix=['tyre', 'track'])
+        y_drv = df_enc['lap_time']
+        drop_cols = [c for c in ('lap_time', 'session_id', 'driver_id', 'driver_code',
+                                 'driver_name', 'session_date', '_year')
+                     if c in df_enc.columns]
+        X_drv = df_enc.drop(columns=drop_cols)
+        drv_features = list(X_drv.columns)
+
+        X_tr, X_te, y_tr, y_te = train_test_split(X_drv, y_drv, test_size=0.2, random_state=42)
+        within_drv = train_and_eval(X_tr, y_tr, X_te, y_te)
+        drv_best = min(within_drv, key=lambda k: within_drv[k][1]['mae'])
+        drv_model = within_drv[drv_best][0]
+        drv_metrics = within_drv[drv_best][1]
+
+        drv_lr = within_drv['LinearRegression'][0]
+        drv_coefs = dict(zip(drv_features, drv_lr.coef_))
+        drv_fuel_burn = min(0.0, drv_coefs.get('tyre_age', 0.0))
+
+        drv_tracks = sorted(f.replace('track_', '') for f in drv_features if f.startswith('track_'))
+        drv_tyres = sorted(f.replace('tyre_', '') for f in drv_features
+                           if f.startswith('tyre_') and f not in ('tyre_age', 'tyre_load'))
+
+        ydir = drivers_dir / str(driver_code) / str(year_int)
+        ydir.mkdir(parents=True, exist_ok=True)
+        joblib.dump(drv_model, ydir / 'best_model.pkl')
+        joblib.dump(drv_features, ydir / 'feature_names.pkl')
+
+        yr_info = {
+            "driver": {"code": str(driver_code), "name": str(driver_name)},
+            "year": year_int,
+            "best_model": drv_best,
+            "metrics": {"within_track": {k: round(v, 4) for k, v in drv_metrics.items()
+                                         if k not in ('predictions', 'y_test')}},
+            "training_samples": int(len(X_tr)),
+            "test_samples": int(len(X_te)),
+            "clean_laps": int(len(year_clean)),
+            "features": drv_features,
+            "coverage": {"tracks": drv_tracks, "tyres": drv_tyres},
+            "tyre_age_coefficient": round(drv_coefs.get('tyre_age', 0.0), 4),
+            "fuel_burn_rate": round(drv_fuel_burn, 4),
+            "trained_at": datetime.now().isoformat()
+        }
+        with open(ydir / 'model_info.json', 'w', encoding='utf-8') as f:
+            json.dump(yr_info, f, indent=2, ensure_ascii=False)
+
+        year_summary.append((str(driver_code), str(driver_name), year_int, len(year_clean),
+                               len(drv_tracks), drv_best, drv_metrics['mae']))
+        print(f"  [TRAIN] {str(driver_code):<4} {year_int} {str(driver_name):<20} "
+              f"laps={len(year_clean):>5} tracks={len(drv_tracks):>2} "
+              f"model={drv_best:<16} MAE={drv_metrics['mae']:.3f}s")
+
+if not year_summary:
+    print("  No (driver, year) pair met the minimum-lap threshold.")
+else:
+    print(f"\n  Trained {len(year_summary)} per-driver-per-year models.")
+
+if not driver_summary:
+    print("  No driver met the minimum-lap threshold — only the global model was saved.")
+else:
+    print(f"\n  Trained {len(driver_summary)} per-driver models in {drivers_dir}.")
+    print("  Compare two drivers head-to-head with: python scripts/driver_comparison.py")
 
 # Visualizations
 if best_name == 'RandomForest':

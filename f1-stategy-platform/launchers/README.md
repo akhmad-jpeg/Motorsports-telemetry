@@ -15,13 +15,14 @@ back to the `python` on your PATH.
 | 02 | `02_import_race.bat` | Imports **one** race (year / race / session / driver) from FastF1 into MySQL | Interactive; re-downloads `f1_cache\` on first run |
 | 03 | `03_import_dataset.bat` | Batch-imports one driver across many races/seasons | More data → better model |
 | 04 | `04_audit_pit_events.bat` | Checks pit-event consistency (dry run), asks before applying fixes | Optional but recommended after imports |
-| 05 | `05_train_model.bat` | Trains LinearRegression vs RandomForest, saves the winner to `ml_models\` | **The training step** |
+| 05 | `05_train_model.bat` | Trains LinearRegression vs RandomForest, saves the winner to `ml_models\` **plus one model per driver** in `ml_models\drivers\` | **The training step** |
 | 06 | `06_run_server.bat` | Starts the Flask/Waitress dashboard at http://localhost:5000 | Ctrl+C to stop |
-| 07 | `07_capture_telemetry.bat` | Live F1 2017/2018 UDP telemetry capture (asks track / tyre / weather) | Same as the legacy `scripts\start_telemetry.bat` but venv-aware |
+| 07 | `07_capture_telemetry.bat` | Live F1 2017/2018 UDP telemetry capture (asks track / tyre / weather / heartbeat interval) | Heartbeat defaults to 5 s — see `scripts\capture_telemetry.py` `--heartbeat` |
 | 08 | `08_predict_lap_times.bat` | Interactive lap-time predictor CLI | Needs a trained model (step 05) |
 | 09 | `09_analyze_performance.bat` | CLI performance charts + summary report for a picked session | Saved under `analysis\` at the project root |
 | 10 | `10_benchmark_models.bat` | Reproducible model-selection benchmark | Informational; does not touch `ml_models\` |
 | 11 | `11_run_tests.bat` | Runs the full unit-test suite (no DB needed) | `python -m unittest discover -s tests` |
+| 12 | `12_compare_drivers.bat` | Head-to-head driver comparison: same track/tyre/age predicted by each driver's own model | Needs step 05 (per-driver models); chart → `ml_models\comparisons\` |
 
 ## Typical first-time flow
 
@@ -31,6 +32,8 @@ back to the `python` on your PATH.
 4. `04_audit_pit_events.bat`
 5. `05_train_model.bat`
 6. `06_run_server.bat` → open http://localhost:5000
+7. `12_compare_drivers.bat` (once models exist) → pick two drivers
+   (or use the 🏁 Driver Comparison tab in the dashboard)
 
 ## Troubleshooting
 
