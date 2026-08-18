@@ -151,6 +151,83 @@ class DashboardApiTests(unittest.TestCase):
                       "but unknown-duration real pits must")
 
     @patch('dashboard.get_db_connection')
+    def test_get_sessions_driver_filter(self, mock_db):
+        """?driver=<CODE> filters the sessions list to one driver."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_db.return_value = mock_conn
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchall.return_value = []
+
+        response = self.client.get('/api/sessions?driver=HAM')
+        self.assertEqual(response.status_code, 200)
+        sql, params = mock_cursor.execute.call_args[0]
+        self.assertIn('WHERE d.driver_code = %s', sql)
+        self.assertEqual(params, ('HAM', 50, 0))
+
+    @patch('dashboard.get_db_connection')
+    def test_get_latest_lap_driver_filter(self, mock_db):
+        """?driver=<CODE> returns that driver's latest lap."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_db.return_value = mock_conn
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = {
+            'lap_time': 81.25, 'lap_number': 5, 'tyre_compound': 'Soft',
+            'tyre_age': 5, 'session_id': 1, 'track_name': 'Spa'
+        }
+
+        response = self.client.get('/api/latest-lap?driver=VER')
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data['track_name'], 'Spa')
+        sql, params = mock_cursor.execute.call_args[0]
+        self.assertIn('d.driver_code = %s', sql)
+        # Live-only: a freshness cutoff is bound after the driver code.
+        self.assertIn('captured_at >= %s', sql)
+        self.assertEqual(params[0], 'VER')
+        self.assertEqual(len(params), 2)
+
+    @patch('dashboard.get_db_connection')
+    def test_get_latest_lap_requires_live_window(self, mock_db):
+        """No lap captured inside the live window -> empty payload (dashes)."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_db.return_value = mock_conn
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = None
+
+        response = self.client.get('/api/latest-lap')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {})
+        sql, params = mock_cursor.execute.call_args[0]
+        self.assertIn('captured_at >= %s', sql)
+        self.assertEqual(len(params), 1)
+
+    @patch('dashboard.get_db_connection')
+    def test_get_drivers_list(self, mock_db):
+        """Dashboard driver selector: distinct drivers with session counts."""
+        import datetime
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_db.return_value = mock_conn
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchall.return_value = [
+            {'driver_id': 44, 'driver_code': 'HAM', 'driver_name': 'Lewis Hamilton',
+             'sessions': 21, 'laps': 1200, 'last_seen': datetime.date(2021, 12, 12)},
+            {'driver_id': 33, 'driver_code': 'VER', 'driver_name': 'Max Verstappen',
+             'sessions': 1, 'laps': 58, 'last_seen': datetime.date(2021, 3, 28)},
+        ]
+
+        response = self.client.get('/api/drivers/list')
+        self.assertEqual(response.status_code, 200)
+        drivers = response.get_json()['drivers']
+        self.assertEqual(len(drivers), 2)
+        self.assertEqual(drivers[0]['code'], 'HAM')
+        self.assertEqual(drivers[0]['sessions'], 21)
+        self.assertEqual(drivers[1]['last_seen'], '2021-03-28')
+
+    @patch('dashboard.get_db_connection')
     def test_get_latest_lap_api(self, mock_db):
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
@@ -169,6 +246,9 @@ class DashboardApiTests(unittest.TestCase):
         data = response.get_json()
         self.assertEqual(data['track_name'], 'Spa')
         self.assertEqual(data['lap_number'], 5)
+        # A returned lap is always live (the query already filtered to the
+        # live window), so the frontend can trust the flag.
+        self.assertIs(data['live'], True)
 
 
 class StrategyFuelNeutralityTests(unittest.TestCase):
