@@ -24,6 +24,7 @@ import argparse
 import queue
 import threading
 import time
+import os
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -55,6 +56,11 @@ UDP_PORT = 20777
 
 # How often to persist a telemetry sample (every Nth packet ≈ 1 Hz at 60 fps)
 TELEMETRY_SAMPLE_RATE = 60
+
+# Live-data heartbeat: the CLI prints a liveness line this often (seconds)
+# so you can see at a glance that laps are still streaming.  When the game
+# pauses/closes the line flips to STALLED with the silence duration.
+HEARTBEAT_INTERVAL_S = 5.0
 
 # Lap-time validity window (milliseconds)
 MIN_VALID_LAP_MS = 60_000    # 60 s  – shorter than this is clearly wrong
@@ -391,18 +397,26 @@ def insert_session(conn, track_id: int, track_name: str,
 
 def insert_lap(conn, session_id: int, lap_number: int, lap_time_ms: int,
                tyre_compound: str, tyre_age: int, fuel_load: float,
-               is_valid: bool, driver_id: int) -> int:
-    """Insert a lap row and return lap_id."""
+               is_valid: bool, driver_id: int, captured_at=None) -> int:
+    """Insert a lap row and return lap_id.
+
+    captured_at defaults to now: a lap written by the capture loop IS live
+    data (game UDP or a live feed).  Historical FastF1 imports never call
+    this function, so their laps keep captured_at NULL and are never
+    treated as live by the dashboard.
+    """
+    if captured_at is None:
+        captured_at = datetime.now()
     cursor = conn.cursor()
     cursor.execute(
         """
         INSERT INTO laps
           (session_id, driver_id, lap_number, lap_time_ms,
-           tyre_compound, tyre_age, fuel_load, is_valid)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+           tyre_compound, tyre_age, fuel_load, is_valid, captured_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (session_id, driver_id, lap_number, lap_time_ms,
-         tyre_compound, tyre_age, fuel_load, 1 if is_valid else 0),
+         tyre_compound, tyre_age, fuel_load, 1 if is_valid else 0, captured_at),
     )
     lap_id = cursor.lastrowid
     conn.commit()
@@ -537,6 +551,105 @@ def db_worker(db_queue: queue.Queue, stop_event: threading.Event,
 
 
 # ---------------------------------------------------------------------------
+# Live-data heartbeat
+# ---------------------------------------------------------------------------
+
+def _heartbeat_line(packets_since_beat: int, last_packet_age_s: float,
+                    beat_elapsed_s: float, packet_count: int,
+                    lap_number: int, lap_time: float,
+                    tyre_compound, tyre_age: int) -> str:
+    """Build one heartbeat liveness line.
+
+    LIVE    -- packets arrived since the last beat: the feed is streaming.
+    STALLED -- nothing arrived: game paused/closed, or the UDP feed died.
+
+    ``last_packet_age_s`` feeds the STALLED message; ``beat_elapsed_s`` is
+    the time since the previous beat, used for the pkt/s rate so a beat
+    that lands microseconds after a packet does not inflate it.
+
+    ASCII only: console output must survive Windows cp1252 consoles.
+    """
+    lap_desc = f"lap {lap_number}"
+    if lap_time >= 1.0:
+        lap_desc += f" ({lap_time:.3f}s)"
+    if packets_since_beat > 0:
+        # beat_elapsed is > 0 at any real beat; clamp only against a 0.0
+        # boundary so the rate can never divide by zero.
+        pps = packets_since_beat / max(beat_elapsed_s, 0.001)
+        return (f"[HEARTBEAT] LIVE | {pps:.0f} pkt/s | "
+                f"{packet_count} pkts | {lap_desc} | "
+                f"{tyre_compound} age {tyre_age}")
+    return (f"[HEARTBEAT] STALLED | no packets for {last_packet_age_s:.1f}s | "
+            f"{packet_count} pkts | {lap_desc} | "
+            f"{tyre_compound} age {tyre_age}")
+
+
+# ---------------------------------------------------------------------------
+# Stream-drop alerts (color + audible beep)
+# ---------------------------------------------------------------------------
+
+def _supports_color() -> bool:
+    """True when ANSI color codes are safe to emit on stdout.
+
+    Requires a real console (not a redirected file/pipe) and, on Windows,
+    VT escape processing enabled for the console (Win10 1809+; Windows
+    Terminal always supports it).
+    """
+    if not sys.stdout.isatty():
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)          # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+# ANSI SGR codes (all ASCII, so cp1252-safe even with VT off).
+_COLOR_CODES = {
+    "live":    "\x1b[32m",     # green
+    "stalled": "\x1b[31m",     # red
+    "dropped": "\x1b[1;31m",   # bold red
+    "resumed": "\x1b[1;32m",   # bold green
+}
+_RESET = "\x1b[0m"
+
+
+def _colorize(text: str, kind: str, enabled: bool) -> str:
+    """Wrap text in ANSI color when enabled; otherwise return it unchanged."""
+    if not enabled or kind not in _COLOR_CODES:
+        return text
+    return f"{_COLOR_CODES[kind]}{text}{_RESET}"
+
+
+def _alert_line(kind: str, silence_s: float = 0.0) -> str:
+    """One-shot alert message for a stream drop or resume (plain ASCII)."""
+    if kind == "dropped":
+        return (f"[ALERT] LIVE DATA DROPPED - no packets for {silence_s:.1f}s - "
+                "check the game or the UDP feed")
+    return "[ALERT] LIVE DATA RESUMED - telemetry is flowing again"
+
+
+def _beep() -> None:
+    """Audible alert: a short beep on Windows, terminal BEL elsewhere."""
+    if os.name == "nt":
+        try:
+            import winsound
+            winsound.Beep(880, 300)
+            return
+        except Exception:
+            pass
+    print("\a", end="", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # Worker-liveness helpers
 # ---------------------------------------------------------------------------
 
@@ -617,6 +730,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--ip",   type=str, default=UDP_IP,   help="UDP listen IP")
     parser.add_argument("--port", type=int, default=UDP_PORT, help="UDP listen port")
+    parser.add_argument(
+        "--heartbeat",
+        type=float,
+        default=HEARTBEAT_INTERVAL_S,
+        help="Seconds between live-data heartbeat lines (0 disables the "
+             "heartbeat and restores the old packet-count status line). "
+             f"Default: {HEARTBEAT_INTERVAL_S:g}",
+    )
+    parser.add_argument(
+        "--no-alert",
+        action="store_true",
+        help="Disable audible beep and color alerts when the heartbeat "
+             "flips to STALLED. Heartbeat lines stay plain text.",
+    )
     return parser.parse_args()
 
 
@@ -639,6 +766,14 @@ def main() -> None:
     print(f"  Tyre        : {starting_tyre}")
     print(f"  Weather     : {weather_label}")
     print(f"  Driver ID   : {GAME_DRIVER_ID}  (Player sentinel)")
+    if args.heartbeat > 0:
+        print(f"  Heartbeat   : every {args.heartbeat:g}s")
+    else:
+        print("  Heartbeat   : disabled (packet-count status)")
+    if args.no_alert:
+        print("  Alerts      : off (--no-alert)")
+    else:
+        print("  Alerts      : beep + color on stream drop/resume")
     print("=" * 60)
 
     db_queue   = queue.Queue()
@@ -676,8 +811,49 @@ def main() -> None:
     packet_count        = 0
     telemetry_counter   = 0
 
+    # ---- Live-data heartbeat state ----
+    current_lap_time   = 0.0   # last packet's in-progress lap time (display)
+    last_packet_ts     = time.monotonic()
+    last_beat_ts       = time.monotonic()
+    packets_since_beat = 0
+    heartbeat_interval = args.heartbeat
+    next_heartbeat_ts  = (time.monotonic() + heartbeat_interval
+                          if heartbeat_interval > 0 else None)
+    was_streaming      = None   # None = first beat, never alerts
+    color_enabled      = _supports_color() if not args.no_alert else False
+
     try:
         while True:
+            # Live-data heartbeat: ticks every interval regardless of packet
+            # flow, so a silent feed is visible within one interval instead
+            # of the console going quiet with no explanation.
+            if next_heartbeat_ts is not None and time.monotonic() >= next_heartbeat_ts:
+                now       = time.monotonic()
+                silence_s = now - last_packet_ts
+                is_live   = packets_since_beat > 0
+                # One-shot alerts only on a LIVE <-> STALLED transition, so
+                # a mid-session drop is noticed without watching the console.
+                if not args.no_alert:
+                    if was_streaming is False and is_live:
+                        print(_colorize(_alert_line("resumed"),
+                                        "resumed", color_enabled))
+                    elif was_streaming is True and not is_live:
+                        print(_colorize(_alert_line("dropped", silence_s),
+                                        "dropped", color_enabled))
+                        _beep()
+                print(_colorize(
+                    _heartbeat_line(
+                        packets_since_beat, silence_s,
+                        now - last_beat_ts, packet_count,
+                        last_lap_number, current_lap_time,
+                        current_tyre_compound, tyre_age,
+                    ),
+                    "live" if is_live else "stalled", color_enabled,
+                ))
+                packets_since_beat = 0
+                last_beat_ts = now
+                was_streaming = is_live
+                next_heartbeat_ts += heartbeat_interval
             try:
                 data, _ = sock.recvfrom(2048)
             except socket.timeout:
@@ -688,6 +864,8 @@ def main() -> None:
                 continue
 
             packet_count += 1
+            packets_since_beat += 1
+            last_packet_ts = time.monotonic()
             parsed = parse_legacy_packet(data)
             if parsed is None:
                 continue
@@ -862,10 +1040,9 @@ def main() -> None:
                     parsed["gear"], parsed["rpm"], parsed["drs"],
                 ))
 
-            if packet_count % 500 == 0:
-                # Periodic liveness check: notice a mid-lap worker death (no
-                # lap boundary to trip the wait-for-result checks) within
-                # ~8 s at 60 fps instead of capturing into the void.
+            if heartbeat_interval <= 0 and packet_count % 500 == 0:
+                # Fallback when --heartbeat 0: the old periodic liveness
+                # check (mid-lap worker death) + packet-count status line.
                 _raise_if_worker_dead(worker, worker_error)
                 print(
                     f"[STATUS] Packets: {packet_count} | "

@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import logging
+from datetime import date, datetime
 from pathlib import Path
 
 # Ensure scripts directory is in sys.path for sibling imports
@@ -296,6 +297,20 @@ def check_existing_session(cursor, track_id: int, season_id: int, driver_id: int
     )
     row = cursor.fetchone()
     return row[0] if row else None
+
+
+def is_live_import(event_date, today=None) -> bool:
+    """
+    True when a FastF1 import is "live" data: the race ran the same day it
+    is being imported.  Same-day races are stamped captured_at=NOW() so the
+    dashboard's top cards treat them like game/live-feed telemetry; anything
+    older stays NULL and never qualifies as live.
+
+    ``today`` is injectable for deterministic tests.
+    """
+    if today is None:
+        today = date.today()
+    return bool(event_date) and event_date == today
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +642,15 @@ def import_race(year: int, race_name: str, driver_id: int,
         track_id, track_name = get_or_create_track(cursor, location, country)
 
         event_date = session.event["EventDate"].date()
+        # A race imported on the day it actually ran is live data: stamp
+        # captured_at so the dashboard's top cards treat it as live, just
+        # like game UDP capture.  Historical imports keep captured_at NULL.
+        live_import = is_live_import(event_date)
+        if live_import:
+            logging.info(
+                f"Same-day race ({event_date}) — laps will be stamped "
+                f"captured_at=NOW() and count as live data"
+            )
 
         # Ensure driver row exists (won't overwrite existing name)
         upsert_driver_from_fastf1(cursor, fastf1_number, fastf1_code, fastf1_name)
@@ -711,11 +735,12 @@ def import_race(year: int, race_name: str, driver_id: int,
                     """
                     INSERT INTO laps
                       (session_id, driver_id, lap_number, lap_time_ms,
-                       tyre_compound, tyre_age, fuel_load, is_valid)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                       tyre_compound, tyre_age, fuel_load, is_valid, captured_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (session_id, driver_id, lap_num, lap_time_ms,
-                     compound, tyre_age, fuel_load, is_valid),
+                     compound, tyre_age, fuel_load, is_valid,
+                     datetime.now() if live_import else None),
                 )
                 lap_id = cursor.lastrowid
                 lap_count += 1

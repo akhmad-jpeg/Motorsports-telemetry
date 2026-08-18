@@ -8,6 +8,7 @@ import queue
 import threading
 import time
 import unittest
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 import pandas as pd
 import sys
@@ -25,6 +26,7 @@ from import_f1_race import (
     resolve_driver_input,
     resolve_race_input,
     classify_weather,
+    is_live_import,
     RACE_CALENDAR,
 )
 
@@ -682,6 +684,121 @@ class CaptureWorkerLivenessTests(unittest.TestCase):
         self.assertNotIn('exc', worker_error)
 
 
+class HeartbeatTests(unittest.TestCase):
+    """The CLI heartbeat line shows at a glance whether telemetry streams.
+
+    LIVE when packets arrived since the last beat (feed streaming), STALLED
+    with the silence duration when none did (game paused/closed/feed dead).
+    Output must stay ASCII-only for Windows cp1252 consoles.
+    """
+
+    def _line(self, packets_since_beat, age, **kw):
+        from capture_telemetry import _heartbeat_line
+        defaults = dict(beat_elapsed_s=2.0, packet_count=100, lap_number=4,
+                        lap_time=83.456, tyre_compound="Soft", tyre_age=3)
+        defaults.update(kw)
+        return _heartbeat_line(packets_since_beat, age, **defaults)
+
+    def test_live_line_reports_streaming(self):
+        line = self._line(120, 2.0)
+        self.assertIn("[HEARTBEAT] LIVE", line)
+        self.assertIn("60 pkt/s", line)          # 120 pkts / 2 s
+        self.assertIn("100 pkts", line)
+        self.assertIn("lap 4 (83.456s)", line)
+        self.assertIn("Soft age 3", line)
+
+    def test_stalled_line_reports_silence(self):
+        line = self._line(0, 12.5)
+        self.assertIn("[HEARTBEAT] STALLED", line)
+        self.assertIn("no packets for 12.5s", line)
+        self.assertIn("lap 4 (83.456s)", line)
+        self.assertNotIn("pkt/s", line)
+
+    def test_lap_time_hidden_when_no_timer(self):
+        # Before the first lap timer ticks (current_lap_time < 1 s) the
+        # heartbeat must not show a bogus "(0.000s)".
+        line = self._line(10, 0.5, lap_time=0.0)
+        self.assertIn("lap 4", line)
+        self.assertNotIn("(", line)
+
+    def test_line_is_ascii_only(self):
+        for line in (self._line(120, 2.0), self._line(0, 12.5)):
+            self.assertTrue(all(ord(c) < 128 for c in line),
+                            f"non-ASCII char in heartbeat line: {line!r}")
+
+    def test_heartbeat_flag_default_and_override(self):
+        from capture_telemetry import parse_args, HEARTBEAT_INTERVAL_S
+        with patch("sys.argv", ["capture_telemetry.py"]):
+            self.assertEqual(parse_args().heartbeat, HEARTBEAT_INTERVAL_S)
+        with patch("sys.argv", ["capture_telemetry.py", "--heartbeat", "30"]):
+            self.assertEqual(parse_args().heartbeat, 30.0)
+        with patch("sys.argv", ["capture_telemetry.py", "--heartbeat", "0"]):
+            self.assertEqual(parse_args().heartbeat, 0.0)
+
+
+class StreamAlertTests(unittest.TestCase):
+    """Color + audible alerts fire on LIVE <-> STALLED transitions.
+
+    Colors are ANSI SGR escapes (ASCII-safe), only emitted when stdout is a
+    real console with VT processing; alerts stay plain text otherwise.
+    """
+
+    def test_alert_drop_line_reports_silence(self):
+        from capture_telemetry import _alert_line
+        line = _alert_line("dropped", 12.5)
+        self.assertIn("[ALERT] LIVE DATA DROPPED", line)
+        self.assertIn("12.5s", line)
+
+    def test_alert_resume_line(self):
+        from capture_telemetry import _alert_line
+        self.assertIn("RESUMED", _alert_line("resumed"))
+
+    def test_alert_lines_are_ascii_only(self):
+        from capture_telemetry import _alert_line
+        for kind in ("dropped", "resumed"):
+            self.assertTrue(all(ord(c) < 128 for c in _alert_line(kind)))
+
+    def test_colorize_plain_when_disabled_or_unknown(self):
+        from capture_telemetry import _colorize
+        self.assertEqual(_colorize("text", "stalled", False), "text")
+        self.assertEqual(_colorize("text", "nope", True), "text")
+
+    def test_colorize_wraps_when_enabled(self):
+        from capture_telemetry import _colorize
+        out = _colorize("text", "stalled", True)
+        self.assertTrue(out.startswith("\x1b[31m"))
+        self.assertTrue(out.endswith("\x1b[0m"))
+        self.assertTrue(all(ord(c) < 128 for c in out))
+
+    def test_supports_color_false_when_not_tty(self):
+        from capture_telemetry import _supports_color
+        with patch("sys.stdout", new=MagicMock(isatty=lambda: False)):
+            self.assertFalse(_supports_color())
+
+
+class LiveImportTests(unittest.TestCase):
+    """A FastF1 import counts as live data only when the race ran today.
+
+    Same-day real-race imports are stamped captured_at=NOW() (dashboard top
+    cards treat them as live); anything older keeps captured_at NULL so
+    historical races can never masquerade as live telemetry.
+    """
+
+    def test_same_day_race_is_live(self):
+        from datetime import date
+        today = date(2026, 8, 18)
+        self.assertTrue(is_live_import(date(2026, 8, 18), today=today))
+
+    def test_past_race_is_not_live(self):
+        from datetime import date
+        today = date(2026, 8, 18)
+        self.assertFalse(is_live_import(date(2025, 9, 7), today=today))
+
+    def test_none_date_is_not_live(self):
+        from datetime import date
+        self.assertFalse(is_live_import(None, today=date(2026, 8, 18)))
+
+
 class CaptureLapValidityTests(unittest.TestCase):
     """In-progress laps (lap_time_ms = 0) must never be stored as valid.
 
@@ -707,6 +824,24 @@ class CaptureLapValidityTests(unittest.TestCase):
         self.assertEqual(lap_id, 42)
         # is_valid column receives 0 for the in-progress lap
         self.assertEqual(cursor.execute.call_args[0][1][7], 0)
+
+    def test_captured_lap_is_stamped_as_live(self):
+        """Live capture stamps captured_at=now, which is what the dashboard
+        uses to distinguish live telemetry from historical imports."""
+        from capture_telemetry import insert_lap
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.lastrowid = 42
+        conn.cursor.return_value = cursor
+        before = datetime.now()
+        insert_lap(conn, 1, 1, 85_000, "Soft", 1, 100.0, True, 1)
+        after = datetime.now()
+        params = cursor.execute.call_args[0][1]
+        self.assertEqual(len(params), 9)
+        stamp = params[8]
+        self.assertIsInstance(stamp, datetime)
+        self.assertLessEqual(before, stamp)
+        self.assertGreaterEqual(after, stamp)
 
     def test_completed_lap_can_be_valid(self):
         cursor, _ = self._insert(lap_time_ms=85_000, is_valid=True)

@@ -64,6 +64,9 @@ CREATE TABLE `laps` (
   `tyre_age` int DEFAULT NULL,
   `fuel_load` float DEFAULT NULL,
   `is_valid` tinyint(1) DEFAULT '1',
+  -- When this lap was captured live (game UDP capture or a live feed).
+  -- NULL for historical FastF1 imports, which are never "live".
+  `captured_at` datetime DEFAULT NULL,
   PRIMARY KEY (`lap_id`),
   KEY `session_id` (`session_id`),
   KEY `fk_laps_driver` (`driver_id`),

@@ -27,17 +27,25 @@ echo    (Also accepted: Clear, Rain, Cloudy, Showers, Overcast)
 set /p WEATHER="Enter Weather: "
 
 echo.
+echo  Heartbeat interval (seconds between live-data heartbeat lines):
+echo    Smaller = faster tick, e.g. 1-2 for quick feedback.
+echo    0 disables the heartbeat (uses the old packet-count status line).
+set "HEARTBEAT=5"
+set /p HEARTBEAT="Enter Heartbeat Interval in seconds [5]: "
+
+echo.
 echo  ============================================================
 echo   SESSION CONFIGURATION
 echo  ============================================================
-echo    Track   : %TRACK%
-echo    Tyre    : %TYRE%
-echo    Weather : %WEATHER%
-echo    Driver  : 0 (Player - game telemetry sentinel)
+echo    Track     : %TRACK%
+echo    Tyre      : %TYRE%
+echo    Weather   : %WEATHER%
+echo    Heartbeat : every %HEARTBEAT%s
+echo    Driver    : 0 (Player - game telemetry sentinel)
 echo  ============================================================
 echo.
 echo  Starting telemetry capture... Press Ctrl+C to stop.
-"%PYTHON%" scripts\capture_telemetry.py --track "%TRACK%" --tyre "%TYRE%" --weather "%WEATHER%"
+"%PYTHON%" scripts\capture_telemetry.py --track "%TRACK%" --tyre "%TYRE%" --weather "%WEATHER%" --heartbeat "%HEARTBEAT%"
 
 echo.
 echo  Capture stopped.
